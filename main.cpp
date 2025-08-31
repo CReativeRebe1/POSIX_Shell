@@ -5,6 +5,7 @@
 #include <pwd.h>
 #include <limits.h>
 #include <cstring>
+#include <errno.h>
 using namespace std;
 
 #define GREEN "\033[1;92m"
@@ -13,6 +14,7 @@ using namespace std;
 #define RESET "\033[0m"
 
 string homeDir;
+string prevDir;
 char *input;
 
 void home(){
@@ -47,13 +49,15 @@ string getDirAdd(){
     string pathAdd = path;
     if(pathAdd.rfind(homeDir,0)==0){
         if(pathAdd.size() != homeDir.size()){
-            currentDIR +=  pathAdd.substr(homeDir.size());
+            currentDIR =  pathAdd.substr(homeDir.size());
         }
+    }
+    else{
+        currentDIR = path;
     }
     return currentDIR;
 }
 void printDetailsTakeInput(){
-    home();
     vector<string> details;
     details = getDetails();
     string basePath = string(GREEN);
@@ -85,16 +89,68 @@ void pwd(){
     cout<<homeDir<<getDirAdd()<<endl;
 }
 
+void cd(vector<string> &trimInput){
+    char path[PATH_MAX];
+    if(!getcwd(path,sizeof(path))){
+        perror("error in getcwd");
+        exit(1);
+    }
+    string currDir = path;
+    if(trimInput.size()>2){
+        cout<<"cd : Error Invalid arguements\n";
+        return;
+    }
+    if(trimInput.size()==1){
+        if(chdir(getenv("HOME"))!=0){
+            perror("chdir failed");
+        }
+    }
+    else if(trimInput[1]=="~"){
+        if(chdir(getenv("HOME"))!=0){
+            perror("chdir failed");
+        }
+    }
+    // else if(trimInput[1]=="."){
+    //     if(chdir(trimInput[1].c_str())!=0){
+    //         perror("chdir failed");
+    //     }
+    // }
+    // else if(trimInput[1]==".."){
+    //     if(chdir(trimInput[1].c_str())!=0){
+    //         perror("chdir failed");
+    //     }
+    // }
+    else if(trimInput[1]=="-"){
+        cout<<prevDir<<"\n";
+        if(chdir(prevDir.c_str())!=0){
+            perror("chdir failed");
+        }
+    }
+    else{
+        if(chdir(trimInput[1].c_str())!=0){
+            perror("chdir failed");
+        }
+    }
+    prevDir =currDir;
+}
+
 int main(int argc ,char* argv[]){
+    home();
     while(1){
         printDetailsTakeInput();
         vector<string> trimInput;
         if(input){
             trimInput= trim();
         }
+        else{
+            continue;
+        }
         
         if(trimInput[0]=="pwd"){
             pwd();
+        }
+        if(trimInput[0]=="cd"){
+            cd(trimInput);
         }
     }
     return 0;
