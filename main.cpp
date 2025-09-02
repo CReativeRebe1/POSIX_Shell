@@ -10,7 +10,6 @@
 #include <sys/stat.h>
 #include <grp.h>
 #include <ctime>
-#include <grp.h>
 
 using namespace std;
 
@@ -22,6 +21,7 @@ using namespace std;
 string homeDir;
 string prevDir;
 char *input;
+vector<vector<string>> DoubleInput;
 
 void home(){
     char temp[PATH_MAX];
@@ -128,6 +128,28 @@ void lsprint_longlist(string &lspath,string &entryName){
     cout <<" "<<entryName+"\n";
 }
 
+void calDIR_TotalBlocks(string &lspath ,bool allhidden ){
+    long long totalBlocks=0;
+    DIR *dirpath = opendir(lspath.c_str());
+    if(!dirpath){
+        perror(lspath.c_str());
+        return;
+    }
+    struct dirent *enterie;
+    while((enterie = readdir(dirpath)) != nullptr) {
+        string entryName = enterie->d_name;
+        if(!allhidden && entryName[0] == '.') 
+               continue;
+        string fullpath = lspath + "/" + entryName;
+        struct stat status;
+        if (lstat(fullpath.c_str(), &status) == 0) {
+            totalBlocks += status.st_blocks;
+        }
+    }
+    cout<<"total "<<(totalBlocks/2)<<endl;
+    closedir(dirpath);
+}
+
 void lsloop(vector<string> &lspath , bool allhidden , bool longlist){
     if(lspath.size()){
         for(long long i=0;i<lspath.size();i++){
@@ -145,10 +167,13 @@ void lsloop(vector<string> &lspath , bool allhidden , bool longlist){
                     perror(lspath[i].c_str());
                     continue;
                 }
+                if(longlist){
+                    calDIR_TotalBlocks(lspath[i],allhidden);
+                }
                 struct dirent *enteries;
-                while ((enteries = readdir(dirpath)) != nullptr) {
+                while((enteries = readdir(dirpath)) != nullptr) {
                     string entryName = enteries->d_name;
-                    if (!allhidden && entryName[0] == '.') 
+                    if(!allhidden && entryName[0] == '.') 
                         continue;
                     if(longlist){
                         lsprint_longlist(lspath[i],entryName);
@@ -193,13 +218,10 @@ void ls(vector<string> &trimInput){
         else if(trimInput[i][0] =='~'){
             if(trimInput[i].size()>1){
                 if(trimInput[i][1] =='/'){
-                    string temp=getenv("HOME");
-                    for(int k=1;k<trimInput[i].size();k++){
-                        temp+=trimInput[i][k];
-                    }
+                    string temp = string(getenv("HOME")) + trimInput[i].substr(1);
                     struct stat status;
-                    if(lstat(trimInput[i].c_str(),&status)<0) {
-                        perror(trimInput[i].c_str());
+                    if(lstat(temp.c_str(),&status)<0) {
+                        perror(temp.c_str());
                         continue;
                     }
                     if(S_ISDIR(status.st_mode)){
@@ -208,7 +230,6 @@ void ls(vector<string> &trimInput){
                     else{
                         lspath_FILE.push_back(temp);
                     }
-                    
                 }
             }else{
                 lspath_DIR.push_back(getenv("HOME"));
@@ -248,16 +269,128 @@ void ls(vector<string> &trimInput){
     }
 }
 
-vector<string> trim(){
-    char *temp = input;
-    vector<string> trimInput;
-    char *token;
-    token= strtok(temp," \t");
-    while (token!= NULL) {
-        trimInput.push_back(token);
-        token = strtok(NULL, " \t");
+// vector<string> trim(){
+//     char *temp = input;
+//     vector<string> trimInput;
+//     char *token;
+//     token= strtok(temp," \t");
+//     while (token!= NULL) {
+//         trimInput.push_back(token);
+//         token = strtok(NULL, " \t");
+//     }
+//     return trimInput;
+// }
+
+vector<string> Normaltrim(string currInput){
+    vector<string> token;
+    string result;
+    bool FLAG_doublequote =false,FLAG_singlequote =false,prevSpace=true;
+
+    for (size_t i=0;i<currInput.size();i++){
+        unsigned char val = currInput[i];
+        if(val== '"' && !FLAG_singlequote){
+            FLAG_doublequote = !FLAG_doublequote;
+            result.push_back(val);
+            prevSpace=false;
+        } 
+        else if(val== '\'' && !FLAG_doublequote){
+            FLAG_singlequote = !FLAG_singlequote;
+            result.push_back(val);
+            prevSpace=false;
+        }
+        else if(isspace(val) &&(!FLAG_singlequote && !FLAG_doublequote)){
+            if(!prevSpace && !result.empty()){
+                token.push_back(result);
+                result.clear();
+            }
+            prevSpace=true;
+        }
+        else{
+            result.push_back(val);
+            prevSpace=false;
+        }
     }
-    return trimInput;
+    if(!result.empty()){
+        token.push_back(result);
+    }
+    return token;
+}
+
+string trimHandleOperator(string currInput){
+    string result;
+    result.reserve(currInput.size()*2);
+    bool FLAG_doublequote =false,FLAG_singlequote =false;
+
+    for(size_t i=0;i<currInput.size();i++){
+        char val = currInput[i];
+        if (val == '"' && !FLAG_singlequote){
+            FLAG_doublequote = !FLAG_doublequote;
+            result.push_back(val);
+            continue;
+        } 
+        else if(val == '\'' && !FLAG_doublequote){
+            FLAG_singlequote = !FLAG_singlequote;
+            result.push_back(val);
+            continue;
+        }
+        
+        if(!FLAG_singlequote && !FLAG_doublequote){
+            if(val=='>'){
+                if(i+1<currInput.size() && currInput[i+1]=='>'){
+                    result+=" >> ";
+                    i++;
+                }
+                else{
+                    result+=" > ";
+                }
+            }
+            else if(val=='|' || val=='<' || val=='&'){
+                result.push_back(' ');
+                result.push_back(val);
+                result.push_back(' ');
+            }
+            else{
+                result.push_back(val);
+            }
+        }
+        else{
+            result.push_back(val);
+        }
+    }
+    return result;
+}
+
+void  multipleInputSplit(){
+    if(!input) return ;
+
+    char *currInput = strdup(input);
+    if(!currInput) return ;
+
+    const char ESCAPEDELIMITER = '\x1E';
+    bool FLAG_doublequote =false,FLAG_singlequote =false;
+
+    for (size_t i = 0;currInput[i];i++){
+        unsigned char val = currInput[i];
+        if (val == '"' && !FLAG_singlequote){
+            FLAG_doublequote = !FLAG_doublequote;
+        } 
+        else if(val == '\'' && !FLAG_doublequote){
+            FLAG_singlequote = !FLAG_singlequote;
+        }
+        else if(val == ';' && (FLAG_singlequote || FLAG_doublequote)){
+            currInput[i] =ESCAPEDELIMITER;
+        }
+    }
+    char *token = strtok(currInput,";");
+    while(token){
+        string str(token);
+        replace(str.begin(),str.end(),ESCAPEDELIMITER,';');
+        string temp1 = trimHandleOperator(str);
+        vector<string> temp2 = Normaltrim(temp1);
+        DoubleInput.push_back(temp2);
+        token =strtok(NULL, ";");
+    }
+    free(currInput);
 }
 
 void pwd(){
@@ -327,17 +460,10 @@ void echo(vector<string> &trimInput){
     }
 }
 
-int main(int argc ,char* argv[]){
-    home();
-    while(1){
-        printDetailsTakeInput();
+void fixedinputloop(){
+    for(size_t i=0;i<DoubleInput.size();i++){
         vector<string> trimInput;
-        if(input){
-            trimInput= trim();
-        }
-        else{
-            continue;
-        }
+        trimInput = DoubleInput[i];
         if(trimInput[0]=="pwd"){
             pwd();
         }
@@ -350,6 +476,21 @@ int main(int argc ,char* argv[]){
         if(trimInput[0]=="ls"){
             ls(trimInput);
         }
+    }
+    DoubleInput.clear();
+}
+
+int main(int argc ,char* argv[]){
+    home();
+    while(1){
+        printDetailsTakeInput();
+        if(input){
+            multipleInputSplit();
+        }
+        else{
+            continue;
+        }
+        fixedinputloop();
     }
     return 0;
 }
