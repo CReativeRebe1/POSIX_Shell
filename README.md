@@ -106,7 +106,7 @@ Compilation
 Compile with the provided makefile:
 make
 
-This generates an executable a.out.
+This generates an executable myshell.
 
 
 Execution
