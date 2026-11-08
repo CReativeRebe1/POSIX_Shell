@@ -1,0 +1,70 @@
+echo "hello" ""world"
+
+echo Aos                         Assignment                              2
+
+echo "Aos                         Assignment                              2"
+
+pwd
+
+cd files/
+
+cd ~
+
+cd -
+
+ls 
+
+ls -a -l ~ . -al .. 
+
+ls -al
+
+gedit &
+
+gedit 
+
+pinfo
+
+pinfo {PID} //use gedit & pid
+
+search search.txt
+
+search count.txt
+
+echo World! >> file1.txt
+cat < file1.txt
+
+sort < lines.txt > lines_sorted.txt
+cat < lines_sorted.txt
+
+cat lines.txt | wc
+
+cat lines.txt | head -3 | tail -2
+
+ls | grep ".txt" > out.txt; cat < in.txt | wc -l >> out.txt
+cat < out.txt
+
+history
+
+history 5
+
+ec<TAB> 
+
+ca<TAB>
+
+cat fi<TAB>
+
+cat lin<TAB> 
+
+cat lines<TAB> 
+
+cat lines_<TAB> 
+
+press Up arrow down arrow and enter
+
+gedit
+CTRL-Z
+
+gedit
+CTRL-C
+
+CTRL-D

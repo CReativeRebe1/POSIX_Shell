@@ -1,0 +1,410 @@
+What I changed (summary)
+
+Added your forwarding handlers SIGINT_CTRL_C and SIGTSTP_CTRL_Z.
+
+These send the corresponding signal to -fg_processGID (negative PID means whole process group).
+
+Installed those handlers with sigaction in init_shell_job_control().
+
+Used tcsetpgrp():
+
+When running a foreground job, the parent gives terminal control to the child's PGID with tcsetpgrp(STDIN_FILENO, child_pgid).
+
+After the FG job finishes or stops, the shell restores terminal control back to shell_pgid.
+
+Track foreground PGID in fg_processGID (volatile sig_atomic_t) so handlers safely see the PGID.
+
+Ctrl-D handling:
+
+When readline() returns nullptr (EOF), the shell prints newline and exits the loop (clean exit).
+
+SIGCHLD handler retained reaping logic using waitpid(-1, ..., WNOHANG) and write() to notify user. (I purposely do not mutate bg_jobs inside the handler because modifying std::vector in a signal handler is unsafe.)
+
+Kept your built-ins and parsing logic unchanged apart from small safety fixes (freeing input, handling empty input).
+
+Detailed runtime flow with examples (step-by-step)
+A. Shell startup
+
+main() → home() sets homeDir.
+
+init_shell_job_control():
+
+Calls isatty() to ensure interactive.
+
+Calls setpgid(shell_pgid, shell_pgid) to put shell into its own process group.
+
+Attempts tcsetpgrp(STDIN_FILENO, shell_pgid) so the shell is initially the terminal's foreground process group.
+
+Installs SIGCHLD handler to reap children.
+
+Installs SIGINT and SIGTSTP handlers that forward those signals to the foreground job group (fg_processGID) when appropriate.
+
+Result: shell is in its own PGID and has safe handlers to forward signals to child jobs.
+
+B. Running a foreground job: sleep 3
+
+User types at prompt:
+
+> sleep 3
+
+
+Flow:
+
+readline() returns the line; parser produces args = ["sleep","3"].
+
+run_external() is called:
+
+Detects not background, is_background = false.
+
+fork() → two processes:
+
+Child:
+
+Calls setpgid(0,0) → child gets its own PGID = child's PID.
+
+Restores SIGINT and SIGTSTP to SIG_DFL so it responds to Ctrl-C/Z.
+
+execvp("sleep", ...) → now child runs sleep.
+
+Parent:
+
+Calls setpgid(pid, pid) to ensure child PGID matches.
+
+Sets fg_pid = pid and fg_processGID = pid.
+
+Calls tcsetpgrp(STDIN_FILENO, fg_processGID) — give terminal control to the child group.
+
+Enters waitpid(pid, &status, WUNTRACED) loop:
+
+Parent blocks until child exits or stops.
+
+While sleep runs, if the user hits:
+
+Ctrl-C:
+
+Kernel sends SIGINT to the foreground process group (child group). Since tcsetpgrp was set to child group, child receives SIGINT and will be killed by default behavior.
+
+If shell also receives a SIGINT (rare since it's no longer foreground) — its handler SIGINT_CTRL_C() will forward to -fg_processGID (safe).
+
+Ctrl-Z:
+
+Kernel sends SIGTSTP to child's group — child stops.
+
+Parent waitpid returns with WIFSTOPPED, parent prints stopped [pid] and pushes the job into bg_jobs for tracking.
+
+After the child exits or is stopped, parent restores control:
+
+tcsetpgrp(STDIN_FILENO, shell_pgid) — terminal returns to the shell.
+
+fg_pid and fg_processGID set back to -1.
+
+Shell prints prompt again.
+
+Effect: foreground behavior matches a real shell — the prompt blocks, child receives Ctrl-C/Z, shell regains control afterward.
+
+C. Running a background job: sleep 10 &
+
+User types:
+
+> sleep 10 &
+
+
+Flow:
+
+Parser sets is_background = true and removes &.
+
+fork() → two processes:
+
+Child:
+
+setpgid(0,0) → new PGID.
+
+SIGINT/SIGTSTP → SIG_DFL (default). But we do not give child terminal control, so the kernel doesn't send Ctrl-C or Ctrl-Z to it from the terminal.
+
+execvp("sleep", ...).
+
+Parent:
+
+setpgid(pid, pid) ensures PGID.
+
+Because is_background, parent does not wait. It prints:
+
+started [12345]
+
+
+and pushes {pid, "sleep"} into bg_jobs.
+
+Shell immediately re-displays the prompt; user can type new commands while sleep runs in the background.
+
+After ~10 seconds:
+
+Child exits; kernel sends SIGCHLD to parent.
+
+sigchld_handler() runs, calls waitpid(-1, &status, WNOHANG) to reap child and writes a status line like:
+
+process [12345] exited with status 0
+
+
+Shell avoids zombies.
+
+Note: background jobs won't get the interactive terminal signals (Ctrl-C/Z) unless you explicitly make them foreground first (not implemented in this minimal shell).
+
+D. Pressing Ctrl-C at the prompt (no FG job)
+
+When no foreground job is running, fg_processGID == -1.
+
+The shell's SIGINT_CTRL_C handler is invoked (if the shell gets SIGINT), checks fg_processGID, sees <= 0, and does nothing.
+
+Shell keeps running.
+
+This exactly matches the assignment requirement: Ctrl-C does nothing at prompt, but interrupts the foreground job if present.
+
+E. Pressing Ctrl-Z while a foreground job runs
+
+If a FG job runs and you press Ctrl-Z:
+
+Kernel sends SIGTSTP to the FG process group (child). Child stops.
+
+Shell may receive SIGTSTP too if it still is in the foreground (rare), but our SIGTSTP_CTRL_Z forwards to -fg_processGID.
+
+The parent waitpid(...WUNTRACED) detects WIFSTOPPED and prints:
+
+stopped [pid]
+
+
+and adds the stopped job to bg_jobs so the user can see it later (e.g., via jobs if you implement it).
+
+Shell restores terminal to itself and returns prompt.
+
+This matches the requirement that Ctrl-Z suspends FG job and moves it to background (stopped).
+
+F. Pressing Ctrl-D at prompt
+
+readline() returns nullptr on EOF (Ctrl-D).
+
+In main() we check if (!input) and break the loop after printing a newline.
+
+Shell exits gracefully, reaping any remaining children non-blocking before returning.
+
+Notes, caveats, and possible improvements
+
+Removing BG job entries: The sigchld_handler reaps children and prints their exit status, but I intentionally did not remove entries from bg_jobs inside that handler because modifying std::vector inside a signal handler is unsafe. If you want bg_jobs to be kept accurate (remove exited jobs), do it from the main loop or mark entries and clean them in the main loop.
+
+Race conditions on setpgid: There's a small race between the parent calling setpgid(pid, pid) and the child calling setpgid(0,0). You already handle it by calling setpgid in both child and parent; that's a standard approach. The errno != EACCES guard helps ignore harmless errors.
+
+SIGCHLD and SA_NOCLDSTOP: I used SA_NOCLDSTOP so we don't get SIGCHLD for stopped children (we handle stops via the waitpid(..., WUNTRACED) in the parent while waiting). If you want the handler to also be notified on stop, remove SA_NOCLDSTOP.
+
+Terminal attributes (tcgetattr/tcsetattr) are not changed for the child here. For full job-control behavior (e.g., job control with stty and job-resume fg/bg) you'd also save/restore terminal attributes. For this assignment minimal tcsetpgrp is sufficient.
+
+Async-signal-safety: Avoid using non-async-signal-safe functions or standard containers inside signal handlers. The handler currently uses waitpid and write, which are safe.
+
+If you want, I can:
+
+Patch one more improvement to clean bg_jobs in the main loop (removing entries whose PIDs have already exited).
+
+Add jobs, fg, and bg commands so you can list and manipulate background/stopped jobs.
+
+Add saving/restoring of terminal modes (termios) to fully emulate job control semantics.
+
+✅ Foreground processes
+
+Example: gedit
+
+Your run_external() forks, sets the child in its own process group, transfers terminal control with tcsetpgrp(), and then waits (waitpid) until the child finishes or is stopped.
+
+Shell regains control afterwards by restoring tcsetpgrp back to the shell PGID.
+→ Works exactly as required.
+
+✅ Background processes
+
+Example: gedit &
+
+Parser strips &, sets is_background = true.
+
+Parent does not wait for child; instead it prints:
+
+started [PID]
+
+
+Parent continues prompting for new commands.
+
+Child runs independently in its own PGID, so it won’t be disturbed by terminal Ctrl-C/Ctrl-Z.
+→ Background jobs work.
+
+Multiple background processes:
+
+Each & command forks its own child PGID, parent pushes {pid, command} into bg_jobs.
+
+bg_jobs is a std::vector, so you can store multiple entries.
+
+SIGCHLD handler reaps exited children (to prevent zombies).
+→ Multiple BG jobs are supported.
+
+✅ Ctrl-Z (SIGTSTP)
+
+If a foreground job is running:
+
+Kernel delivers SIGTSTP to the foreground process group (child group).
+
+Parent’s waitpid(..., WUNTRACED) returns with WIFSTOPPED.
+
+Shell prints stopped [pid] and moves the job into bg_jobs (marked as stopped).
+
+If no foreground job → fg_processGID == -1, so handler does nothing.
+→ Matches requirement.
+
+✅ Ctrl-C (SIGINT)
+
+If a foreground job is running:
+
+Kernel sends SIGINT to child’s PGID (because tcsetpgrp gave it the terminal).
+
+Child dies by default, parent detects termination via waitpid.
+
+If no FG job → handler does nothing.
+→ Matches requirement.
+
+✅ Ctrl-D (EOF)
+
+When user presses Ctrl-D at prompt, readline() returns nullptr.
+
+Shell prints newline and exits loop, gracefully exiting.
+→ Matches requirement.
+
+❓ pinfo on background jobs
+
+Right now you haven’t implemented pinfo, but your framework is ready:
+
+You already maintain bg_jobs with PID and command name.
+
+If you add a pinfo <pid> command that looks up /proc/<pid>, it will work for both running and stopped background jobs (as long as they still exist in /proc).
+
+The only missing piece: removing dead PIDs from bg_jobs safely.
+
+Currently, you reap children in the SIGCHLD handler but don’t remove them from bg_jobs (because touching vector inside a signal handler is unsafe).
+
+Fix: in the main loop, periodically check bg_jobs against kill(pid,0) or use a cleanup routine to remove exited PIDs.
+
+So: Yes, multiple background jobs are already supported. If you implement pinfo, it will work, but you’ll want to add cleanup so bg_jobs doesn’t show dead processes.
+
+🔍 Bottom line
+
+✅ Foreground jobs behave correctly (waits until exit).
+
+✅ Background jobs run, shell prints PID, multiple are supported.
+
+✅ Ctrl-C, Ctrl-Z, Ctrl-D behaviors are correct.
+
+⚠️ For pinfo: needs only one extra step → remove finished jobs from bg_jobs in the main loop, not inside sigchld_handler.
+
+👉 Do you want me to extend the code so that bg_jobs is automatically cleaned in the main loop, so pinfo (when you add it) won’t show stale PIDs?
+
+You said:
+yes give me where should i add this too and how will it work
+ChatGPT said:
+
+Perfect 👍 let’s make your background jobs list self-cleaning so that when you later add pinfo, it will only show live PIDs.
+
+🔎 Why we need this
+
+Right now:
+
+bg_jobs stores {pid, cmd} when a background job starts.
+
+sigchld_handler reaps exited children but cannot safely modify bg_jobs, because modifying STL containers inside a signal handler is unsafe.
+
+Result: finished jobs remain stuck in bg_jobs → pinfo would list dead processes.
+
+Fix:
+
+sigchld_handler just reaps & prints exit message.
+
+The main loop periodically cleans up bg_jobs by removing entries whose PIDs no longer exist.
+
+🛠 Code Changes
+1. Add cleanup helper
+
+Place this below your bg_jobs definition:
+
+// Clean up bg_jobs: remove entries whose processes no longer exist
+void cleanup_bg_jobs() {
+    auto it = bg_jobs.begin();
+    while (it != bg_jobs.end()) {
+        // kill(pid, 0) checks if a process exists without sending signal
+        if (kill(it->pid, 0) == -1 && errno == ESRCH) {
+            // process is gone, remove from list
+            it = bg_jobs.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+2. Call cleanup in the main loop
+
+In your main() loop, right after running commands:
+
+while (1) {
+    printDetailsTakeInput();
+    if (!input) {
+        printf("\n");
+        break;   // exit on Ctrl-D
+    }
+
+    multipleInputSplit();
+    fixedinputloop();
+
+    cleanup_bg_jobs();  // <<< add here
+}
+
+🔄 How it works (example)
+Case 1: Run background jobs
+<Name@UBUNTU:~> sleep 5 &
+started [1234]
+<Name@UBUNTU:~> sleep 10 &
+started [1235]
+
+
+Both PIDs stored in bg_jobs.
+
+Case 2: Jobs exit
+
+After 5 sec, PID 1234 exits.
+
+sigchld_handler reaps it and prints:
+
+process [1234] exited with status 0
+
+
+But entry {1234, "sleep"} is still in bg_jobs.
+
+Case 3: Cleanup
+
+After user types any command, cleanup_bg_jobs() runs.
+
+It sees kill(1234, 0) → ESRCH (process gone).
+
+Removes 1234 from bg_jobs.
+
+Only {1235, "sleep"} remains.
+
+Now, if you later implement:
+
+<Name@UBUNTU:~> pinfo 1234
+
+
+→ You’d get "No such process".
+But:
+
+<Name@UBUNTU:~> pinfo 1235
+
+
+→ Works (reads /proc/1235/...).
+
+✅ Benefits
+
+Safe: no STL modifications in signal handler.
+
+Automatic: bg_jobs always reflects only live/stopped processes.
+
+Prepares your shell for correct pinfo implementation.

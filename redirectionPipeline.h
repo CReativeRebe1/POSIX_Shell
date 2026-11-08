@@ -4,7 +4,7 @@
 
 RedirInfo parseRedirections(vector<string> &args) {
     RedirInfo r;
-    for (size_t i = 0; i < args.size();) {
+    for(size_t i = 0; i < args.size();){//no increment
         if (args[i] == "<") {
             if (i + 1 >= args.size()) {
                 cerr << "syntax error near unexpected token `<`\n";
